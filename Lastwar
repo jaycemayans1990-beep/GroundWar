@@ -1,19 +1,138 @@
--- Luau | glx_aimbot_v3_16_sniper.lua | Roblox executor (Synapse-style env)
+-- Luau | glx_aimbot_v3_14.lua | Roblox executor (Synapse-style env)
 -- =====================================================================
 -- [v3.12] MERGE: BehindTP (เทเลพอร์ตด้านหลังเป้า) รวมเข้าไฟล์เดียวกับ GLX aimbot
 --     - ปุ่ม "TP" ลอยบนจอ (ลากย้ายได้, ป้าย 🔒 ล็อกการลาก) — แตะ = เทเลพอร์ตทันที
 --       ไปหลังศัตรูที่เล็ง/ใกล้จุดเล็งที่สุดบนจอ (10 studs, หันหน้าเข้าหาหลังเป้า)
 --     - toggle "Teleport System" ในเมนู GLX = เปิด/ปิดระบบทั้งหมด
+--       ปิดเมื่อไร ปุ่ม TP + ป้ายล็อกถูกเก็บออกจากจอทันที (ทิ้งไว้เหมือนเดิมตอนเปิดกลับ)
+--     - ข้อความไทยเข้าระบบตารางเลข T{} เดิม (M9-M11) — ไม่มี UTF-8 ไทยลอยในสตริง
 --     - ปุ่ม/conn ทั้งหมดลงทะเบียน CleanupManager = CleanAll รอบใหม่เก็บของเก่าครบ
 -- =====================================================================
 -- GLX ADVANCED PREDICTION AIMBOT & ESP (v3.10 — PERF BUILD)
+-- - [v3.10] ตรวจบั๊ก + ลดทรัพยากรสิ้นเปลือง (audit รอบสาม) — 6 จุด:
+--     (1) [HIGH] watchdog ฟื้น loop แบบ "ติดซ้อน" — เกมย่อ/สลับหน้าต่าง RenderStepped พัก
+--         แต่ Heartbeat (watchdog) ยังวิ่ง = ทุกวินาทีติด RenderStepped conn ใหม่ ทั้งที่
+--         ตัวเก่ายังมีชีวิต (AddConn แค่แทนชื่อในทะเบียน ไม่ได้ฆ่า callback เก่า)
+--         กลับมาเต็มจอ = aim loop ซ้อนกอง N ตัวหมุนกล้องสู้กันเอง + CPU ×N
+--         → เช็ค conn เดิมยัง Connected ก่อนติดใหม่ (ทั้ง aim loop และ ESP loop)
+--     (2) [HIGH] ปิด ESP ทั้งสอง toggle แล้วป้ายค้างบนจอ — v3.9 เพิ่ม early-return ใน
+--         ESP heartbeat ตอน ESP ปิดทั้งคู่ ทำให้ไม่มีใครเก็บ Highlight/NameTag เดิม
+--         (สีค้างจน respawn) → ปิด toggle ไหน เก็บป้ายประเภทนั้นทันที (clearESPVisuals)
+--     (3) [MED] กวาดป้ายกำพร้า "รอบสแกน" (ไม่มีเจ้าของเลย) ลบป้ายของคนที่ยังมีชีวิต —
+--         เดิม not (owned and owned[inst]) เมื่อ owned=nil = true ทุกชิ้น → ลบทุก 5 วิ
+--         แล้ว ProcessESP สร้างคืน = churn สร้าง/ทำลาย Instance วนตลอด
+--     (4) [MED] เส้นทางเขียนแถบสถานะ 2 ทาง (setStickyStatus/setStatusFn) ข้ามทะเบียน
+--         lastStatusText ของ FPS meter → ข้อความ sticky/error โดนทับก่อนครบอายุ
+--         → รวมเขียนผ่าน applyStatusText จุดเดียว
+--     (5) [PERF] ProcessESP ออกทันทีเมื่อ ESP ปิดทั้งคู่ — เดิมยัง GetPlayers +
+--         isValidEnemy ต่อคนทุก tick ทั้งที่ผลลัพธ์ถูกทิ้ง (คู่กับข้อ 2)
+--     (6) [PERF] EMA ความเร่ง: คำนวณตัวคูณ Lerp ของ velocity ครั้งเดียวต่อ sample —
+--         เดิม math.exp(-dt/VEL_TAU) เรียกซ้ำสามจุดในสายเดียวกัน
+--     (6b) [PERF] CheckVisibility: โดนใกล้จุดเล็ง < 3 ซม. = ถึงแล้ว → จบทันที
+--         (ตัด IsDescendantOf + วง pierce ที่เหลือ — แผนที่ใส/รั้วบางจบเร็วขึ้นทั้งสาย)
+-- - [v3.9] ตรวจบั๊ก + ลดทรัพยากรสิ้นเปลือง (ผล audit รอบสอง) — 10 จุด:
+--     (1) [LEAK] CleanAll ไม่ปล่อย Glx_Cleanup → loop กวาด ESP/TargetStates ยังตื่นมา
+--         ทำงานเปล่าทุก 5-10 วิ ตลอดไปหลัง unload — เคลียร์ identity ให้ loop ตายตามรอบ
+--     (2) [PERF] FilterDescendantsInstances ถูก set ทุกครั้งที่ยิง ray (property ตัวนี้ copy
+--         array ฝั่ง C++ ทุกครั้ง) → push ใหม่เฉพาะเมื่อส่วนผสม filter เปลี่ยนจริง
+--     (3) [PERF] หน้าทางจับเป้า (Acquire/Keep/CheckSwitch) เทียบกำลังสองระยะแทน Vector2.new
+--         + .Magnitude — ตัด alloc + sqrt ต่อผู้เล่นต่อเฟรม (พฤติกรรม/ผลเดิมทุกจุด)
+--     (4) [PERF] KeepTarget รายงาน on/off-screen มาด้วย — ตัด WorldToViewportPoint ซ้ำใน
+--         สาย grace (เดิม project จุดเดียวกัน 2 ครั้ง/เฟรมตอนเป้าล่อขอบวง)
+--     (5) [PERF] ESP แคช Head + TagLabel ต่อ player — จบ FindFirstChild 30×2 ครั้ง/วิ/คน
+--         (กัน ref เน่าด้วยเช็ค Parent ทุก tick เหมือนระบบ self-heal เดิม)
+--     (6) [PERF] FPS meter เขียน StatusLabel.Text เฉพาะเมื่อข้อความเปลี่ยน + เมนูเปิด —
+--         เดิมปล่อย property dirty ทุกวินาทีทั้งที่เมนูปิด/ค่าเดิม
+--     (7) [PERF] วง FOV เขียน Position/Radius/Visible เฉพาะเฟรมที่ค่าเปลี่ยนจริง
+--     (8) [PERF] TargetStates เป็น weak keys — entry ของ HRP ที่ถูกทำลายถูก GC เอง,
+--         loop กวาดเดิมคงไว้เป็นตัวสำรอง
+--     (9) [PERF] แคช ForceField ต่อ player 0.25 วิ — เดิม FindFirstChildOfClass ทุกครั้ง
+--         ที่เช็คศัตรู (ต่อผู้เล่น/เฟรม) — spawn guard ยังจับได้ใน 0.25 วิ
+--     (10) [BUG] UI callback (Auto Weapon Speed / Drop Mode / สไลเดอร์กระสุน) กัน
+--          WeaponService nil — ไฟล์โหลดค้างครึ่งทางแล้วไปกดปุ่ม = error เงียบ ๆ ใน console
+-- - [v3.8] ตรวจบั๊กรอบใหม่ทั้งไฟล์ (audit) — แก้ 12 จุด:
+--     (1) [HIGH] WeaponCheck default false ตามคลุม v3.4 (เดิม true = บนเกมปืน viewmodel
+--         เช่น Ground War aimbot เงียบตั้งแต่โหลด — อาการเดิมย้อนกลับมาผ่าน default)
+--     (2) [HIGH] สลับ "Drop Value Mode: Multiplier" แล้วล้าง WeaponCache — เดิมปืนที่ถือ
+--         อยู่คืนค่า speed/gravity เก่าจาก cache จนกว่าจะ re-equip = toggle เงียบ
+--     (3) [MED] ลากปุ่ม "Glx" แล้วเมนูไม่เด้ง — enableDrag คืนตัวเช็ค "เพิ่งลาก" (ขยับ ≥6px)
+--         ให้ click handler ข้าม (เดิมปล่อยมือบนปุ่ม = MouseButton1Click ยิง = เมนูสลับเอง)
+--     (4) [MED] Target Part แบบ Random บน R6 — สุ่มเจอชื่อที่ rig ไม่มี (UpperTorso ฯลฯ)
+--         = ล็อคที่รากทันที (เดิมเก็บชื่อที่ไม่มีจริง = re-roll ทุกเฟรม จุดเล็งเด้งรัว ๆ)
+--     (5) [MED] วงจับเป้า (scaledFOV) scale ตามซูม — ตามคลุม "Zoom-aware ทุกตัวคุม"
+--         (เดิมคงที่เชิงพิกเซล = ซูม 4x วงจับกว้างขึ้น 4 เท่าเชิงมุม จับเป้านอกจอกลาง ๆ)
+--     (6) FlickSpeed fallback 140→90 ให้ตรง default (เดิม or 140 เป็นค่าตาย)
+--     (7) FALLBACK_SPEED (3000) ใช้จริงใน Auto mode เมื่อไม่มีข้อมูลปืน (เดิมดิ่งไปอ่าน
+--         State.BulletSpeed=5000 ทั้งที่คลุมบอก "fallback เดียวทั้งไฟล์") — lead ต่างเดิมเล็กน้อย
+--     (8) วง FOV จริง set NumSides=64 (เดิมมีแต่ใน dummy — บาง executor วงเป็นรูปหลายเหลี่ยม)
+--     (9) sweeper ของ TargetStates เช็ค identity Glx_Cleanup แทน Glx_Running — รอบใหม่
+--         เซ็ต Glx_Running=true ทับก่อน loop เก่า wake = loop ซอมบี้เก่าไม่ตาย
+--     (10) conn ลาก slider ลงทะเบียน CleanupManager + RemoveConn ตอนปล่อย (เดิมรั่วถ้า
+--          unload กลางจับ) — เพิ่ม CleanupManager:RemoveConn()
+--     (11) แก้คอมเมนต์ "เพดาน 70 °/s" ให้ตรงความจริง (70 = อัตรา exponential / time-constant,
+--          ตัวกำหนดก้าวจริงคือ maxStepDps) — โค้ดไม่แก้ พฤติกรรมเดิม
+--     (12) ESP NameTag โชว์ DisplayName (fallback Name)
+-- - [v3.7] แก้อาการ "เป้าหนึบเกิน สลับย้ายเป้าหมายลำบาก" (v3.6 ลื่นแล้ว แต่ล็อคแน่นเกินไป) — 3 จุด:
+--     (1) ตัววัดความเร็วมือ (userDps) มีจุดตายอีกฟาก: ตอนมือ "ลากสวน" แรงดึงของ aimbot
+--         สูตร min(a,b) อ่าน |แรงดึง − มือ| ไม่ใช่ความเร็วมือจริง (ลากมือ 210°/s อ่านได้แค่ 30°/s)
+--         → Free Steer / Drag Switch ไม่มีวันเข้าเงื่อนไข = กล้องดูดค้างเหมือนกาว สลับเป้าไม่ออก
+--         → แก้: เทียบแกนหมุนของมือกับแกนแรงดึง — ลากสวน = เชื่อค่าความเร็วมือจริงทันที
+--     (2) เพิ่ม toggle "Switch Assist" (default ON): ขณะล็อคเป้าอยู่ ถ้าชี้ใกล้ศัตรูอื่นชัดเจน
+--         (ใกล้จุดเล็งกว่าเป้าเดิมเกือบ 2 เท่า และอยู่ในวง FOV + เช็คกำแพง) → สลับเป้าให้เองทันที
+--         กล้องไหลข้ามไปแบบต่อเนื่องไม่กระตุก ไม่ต้องสะบัดจอ + กันเป้าเก่าดูดกลับ 0.3 วิ
+--     (3) เกณฑ์ Free Steer ลด 45→30°/s — ลากเบา ๆ ก็ผ่อนแรงดึงตามมือ (วัดความเร็วมือจริงได้แล้ว)
+-- - [v3.6] แก้ต่ออาการ "กระตุกเหมือน snap ตลอด" (v3.5 ยังกระตุก) — เจอบั๊กราก 2 จุด:
+--     (1) userDps (ตัววัดความเร็วมือผู้เล่น) นับความเร็วกล้องที่ aimbot หมุนเองปนเข้าไปตอนเมาส์นิ่ง
+--         → DragSwitch ตีความว่ากำลังสะบัดจอทุกเฟรมระหว่างไหล → ปล่อยล็อค+พัก 0.3 วิ วนลูป
+--         = ไหล 2 เฟรม-แข็ง-ไหล-แข็ง ตลอดเวลา (ต้นตอ "ตัดภาพทีละฉาก" ตั้งแต่รุ่นก่อนด้วย)
+--         → แก้: หักลบอิทธิพลตัวเองแบบไม่มีเงื่อนไข + สะบัดต้องค้าง ≥0.06 วิ ถึงเปิดหน้าต่างปล่อยล็อค
+--     (2) เฟรมแรกหลังล็อค alpha×err = ก้าวใหญ่เฟรมเดียว (คลาด 30° = จุ๊บ ~20° = ภาพตัด)
+--         → ใส่เพดานก้าวต่อเฟรม: คลาดมาก = ไหลความเร็วคงที่ ใกล้เป้าค่อย exponential — ไม่มีจุ๊บอีก
+-- - [v3.5] รื้อระบบความเร็วการเล็ง — แก้อาการ "กล้องไต่ไปหาเป้าช้า ๆ แล้วดีดเป็นช่วง ๆ เหมือนตัดภาพ":
+--     (1) ถอด Snap Angle ออกทั้งระบบ (สไลเดอร์ + สูตร blend — ต้นตอกินมุมทีเดียวจบ),
+--     (2) ถอด switch-ease cap (ไต่ช้า 0.15 วิ.แรกหลังล็อคแล้วเร่งเต็มสปีด = ความเร็วสะดุดกลางทาง),
+--     (3) เหลือ rate เดียวต่อเนื่อง: rate = base(Aim Speed) + error×Catch-Up Boost เพดาน 70°/s —
+--     ยิ่งคลาดมากยิ่งไล่ไวขึ้นแบบไหล ไม่มี threshold/ไม่มีจังหวะเปลี่ยนโหมด = กล้องไหลสมูทถึงเป้าเสมอ
+--     (สไลเดอร์ Smoothness เปลี่ยนชื่อเป็น "Aim Speed" — สูงขึ้น = เร็วขึ้น, ต่ำลง = นุ่มช้าขึ้น)
+-- - [Glx] รีแบรนด์ UI ทั้งสคริปต์: SNYX/SnyX → GLX/Glx — ปุ่มเปิดเมนู, ชื่อ ScreenGui
+--     (Glx_UI), หัวเมนู GLX ADVANCED SYSTEM, ข้อความ console/แถบสถานะ และตัวแปร getgenv
+--     (Glx_Running / Glx_Cleanup) + เคลียร์รอบเก่าชื่อ SnyX_* จากเวอร์ชั่นก่อนหน้าให้ด้วย
+--     + ธีมสีใหม่ "GLX เขียวนีออน" (0,255,153 แทนม่วงเดิม) ทั้งปุ่ม/ขอบ/สไลเดอร์/ปุ่มโหมด/แถบสถานะ
+--     + แก้ตัวอักษร "Glx" บนปุ่มเบลอ: ตำแหน่ง UI ปัดเป็นพิกเซลเต็ม (ตำแหน่ง scale ทศนิยม =
+--       subpixel rendering คือต้นตอเบลอ) + ฟอนต์ GothamBold + TextSize 14→18 + ขอบ 1.5→2
+-- - [v3.4] แก้อาการ "เล่นไปสักพัก ESP หาย + เป้าที่เคยล็อคได้กลับล็อคไม่ได้" — 4 ชั้น:
+--     (1) ลูกรั่ว Highlight: ผู้เล่นตาย/เกิดใหม่ = ป้าย ESP ค้างบนศพใน workspace สะสมจนถึง
+--         ลิมิต 31 Highlight ที่จอวาดได้ → ป้ายใหม่ไม่ถูกวาดเงียบ ๆ = ESP หายทั้งระบบ
+--         → ทำลายป้ายของ entry เก่าทุกครั้ง + กวาดป้ายกำพร้าทุก 5 วิ
+--     (2) cache ผู้เล่นเน่า: เกมสลับ Humanoid/RootPart ในตัวละครเดิม = ref เก่าตายค้าง
+--         → คนนั้นล็อคไม่ได้ตลอด — getComponentsตรวจ ref เน่าแล้วหาใหม่เองทุกเฟรม (self-heal)
+--     (3) watchdog: loop ESP/aim ตายเงียบ ๆ = ฟื้น connection เองใน ≤2 วิ + pcall ครอบทุก tick
+--         (ผู้เล่นประหลาดตัวเดียวพังไม่ลากทั้งระบบ) + error ขึ้นแถบสถานะ 6 วิ
+--     (4) Weapon Check default OFF — ปืน viewmodel (Ground War) ไม่ใช่ Tool รีรันแล้วลืมกด
+--         toggle = aimbot เงียบ; เกมที่ปืนเป็น Tool ค่อยเปิดเอง
+-- - [v3.3] ถอด Silent Aim และ Trigger Bot ออกจากสคริปต์ทั้งหมด (ตามคำขอ) — สิ่งที่หายไปพร้อมกัน:
+--     hook ทุกชนิดที่ครอบเกม (__namecall / hookfunction Raycast / __index เมาส์)
+--     การสังเคราะห์ input ทุกชนิด (VirtualUser Button1Down/Up, mouse1press/release)
+--     UI ของทั้งสองระบบ + โปรไฟล์เกม Ground War + internalRaycast (ไม่มี hook ให้ต้องเลี่ยงแล้ว)
+--   ผลลัพธ์: สคริปต์ไม่ยุ่ง ray และ input ของเกมแม้แต่บรรทัดเดียว — ต้นตออาการ
+--   "แลคมาก + ปืนยิงกระสุนไม่ออก + เกมปิดเอง" ถูกถอนรากจากตัวสคริปต์โดยสิ้นเชิง
+-- - ฟีเจอร์ที่เหลือครบ: aimbot prediction (intercept + bullet drop/ping), continuous glide,
+--   drag-to-switch, Switch Assist, Free Steer, Lag Comp, Zoom Adapt, wall/team/weapon check,
+--   ESP ทุกฟีเจอร์, FOV circle, FPS meter ในแถบสถานะ
+-- - [v3.2] toggle "Weapon Check" — ปืนไม่ใช่ Tool (viewmodel เช่น Ground War) = ปิด toggle
+--   นี้เพื่อให้ aimbot เล็งได้ + FPS meter ในแถบสถานะ
+-- - [v3.1] UI สร้างก่อนระบบอื่นทั้งหมด = เมนูขึ้นเสมอ + แถบสถานะบอกจุดโหลด + ล้างรอบเก่า
+--   pcall ทุกรายการ + LocalPlayer รอ spawn สูงสุด 10s
+-- - [v2.7] ล็อคไวขึ้น + สลับเป้าไม่ติดเหนียว + free steer + switch ease
+-- - [v2.6] hysteresis วงเก็บ 1.35× / grace 0.25s / velocity+zoom EMA / hitch guard
+-- - [v2.4] Zoom-aware ทุกตัวคุม / Lag Comp อยู่ในตัว solve
+-- =====================================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-
 if not LocalPlayer then
         for _ = 1, 100 do
                 task.wait(0.1)
@@ -36,7 +155,7 @@ local M4 = T{124,75,91,76,85,83,89,31,44,40,32,99,164,252,194,215,128,152,218,13
 local M5 = T{216,128,184,219,132,150,222,135,229,161,250,215,164,253,194,215,128,154,218,131,166,221,134,168,160,249,250,163,252,196,166,143,155,217,130,139,220,133,164,223,248,219,98,161,196,209,102,215,128,167,218,131,159,221,135,182,160,249,239,163,252,228,166,142,187,217,130,177,220,132,183}
 local M6 = T{79,88,78,88,84,89,81,88,122,97,162,251,219,165,254,128,216,128,179,219,132,164,30,94,41,44,98,47,43,42,54,23,216,129,187,219,132,152,222,135,241,161,250,217,164,253,231,215,128,139,218,130,189,221,134,154,160,248,203,163,252,226}
 local M7 = T{79,88,78,88,84,89,81,88,122,97,162,251,219,165,254,128,216,128,179,219,132,164,30,122,19,17,98,47,43,42,54,23,216,129,187,219,132,152,222,135,241,161,250,217,164,253,231,215,128,139,218,130,189,221,134,154,160,248,203,163,252,226}
-local M8 = T{99,126,118,99,28,75,13,17,113,119,31,99,164,252,196,215,128,146,218,131,153,221,134,171,160,249,232,163,252,246,166,142,184,217,130,152,220,132,185,223,248,201,98,161,196,209,102,68,72,92,95,95,28,0,30,114,53,59,56,47,33,19,35,91,87,90,83,79,69,29,222,135,200,161,250,224,164,253,242,215,128,190,218,131,190,221,134,146,160,249,197,163,252,222,166,143,143,217,130,162,16,29,89,77,33,55,43,55,61,101,166,143,162,217,130,143,220,133,167,31,125,97,111,4,107,119,102,215,128,174,218,131,132,221,134,190,160,249,217,163,252,242,166,143,161,25,18,72,82,84,88,89,96,161,250,225,164,253,241,215,128,160,218,131,158,221,134,142,160,249,219,106,100,101,102,23,24,25}
+local M8 = T{99,126,118,99,28,75,13,17,113,114,31,99,164,252,196,215,128,146,218,131,153,221,134,171,160,249,232,163,252,246,166,142,184,217,130,152,220,132,185,223,248,201,98,161,196,209,102,86,81,84,88,84,72,29,21,31,5,18,18,99,111,101,166,142,184,217,130,172,220,132,190,223,248,228,162,251,218,165,254,154,216,129,153,219,133,177,222,135,213,97,105,99,51,36,50,84,80,93,85,92,28,21,222,134,196,161,250,226,164,252,206,215,128,152,218,131,137,29,86,80,47,42,98,108,100,165,255,179,216,129,155,219,133,181,222,135,225,161,250,246,100,44,40,71,77,77,26,219,132,151,222,135,241,161,250,196,164,252,198,215,128,189,218,131,159,221,134,141,160,249,242,163,252,238,166,142,180,16}
 local M9 = T{216,128,190,219,132,156,222,134,200,161,250,221,164,253,220,215,129,185,218,131,167,221,135,182,160,249,240,163,252,238,166,143,153,217,130,137,220,133,156,223,248,219,162,251,221,165,254,156,216,129,163,219,133,180,222,135,242,161,250,203,164,253,235}
 local M10 = T{216,128,186,219,132,170,222,134,192,161,250,230,164,253,216,215,128,148,218,131,159,221,135,179,160,249,215,163,252,239,166,143,139,217,131,187,220,133,157,223,249,198,162,251,204}
 local M11 = T{216,129,161,219,132,137,222,135,212,161,250,224,164,253,246,215,128,163,218,131,166,221,135,191,160,249,213,163,253,197,166,143,157,217,130,165,220,133,147,223,248,226,162,250,200,165,254,162,216,128,187,219,132,152,222,134,201,161,250,228}
@@ -46,7 +165,7 @@ if not LocalPlayer then
         return
 end
 
-local FALLBACK_SPEED = 2000
+local FALLBACK_SPEED = 3000
 
 local CleanupManager = {
         Connections = {},
@@ -110,15 +229,34 @@ if getgenv().Glx_Cleanup and type(getgenv().Glx_Cleanup.CleanAll) == "function" 
 end
 getgenv().Glx_Cleanup = CleanupManager
 getgenv().Glx_Running = true
+print(("[GLX v3.11] tick=%.3f step1: cleanup OK, decoding UI strings"):format(os.clock()))
 
 local State = {
-        Aimbot = true, TeamCheck = true, WallCheck = false, Prediction = true,
-        PredReactivity = 1.5, PredMaxSlew = 3.0, TrackBoost = 1.5, LagComp = true,
-        DragSwitch = true, FlickSpeed = 90, FreeSteer = true, SwitchAssist = true,
-        WeaponCheck = false, TargetPartMode = "Head", PingCompensation = true,
-        DropIsMultiplier = true, AutoBulletSpeed = true, BulletSpeed = 2000,
-        BulletGravity = workspace.Gravity, Smoothness = 0.8, FOV = 100, ShowFOV = false,
-        ESP = true, ESPName = true, Teleport = false
+        Aimbot = true,
+        TeamCheck = true,
+        WallCheck = false,
+        Prediction = true,
+        PredReactivity = 1.5,
+        PredMaxSlew = 3.0,
+        TrackBoost = 1.5,
+        LagComp = true,
+        DragSwitch = true,
+        FlickSpeed = 90,
+        FreeSteer = true,
+        SwitchAssist = true,
+        WeaponCheck = false,
+        TargetPartMode = "Head",
+        PingCompensation = true,
+        DropIsMultiplier = true,
+        AutoBulletSpeed = true,
+        BulletSpeed = 5000,
+        BulletGravity = workspace.Gravity,
+        Smoothness = 0.8,
+        FOV = 100,
+        ShowFOV = false,
+        ESP = true,
+        ESPName = true,
+        Teleport = false
 }
 
 local function getCamera() return Workspace.CurrentCamera end
@@ -144,7 +282,9 @@ local function isFiniteVec3(v)
         if typeof(v) ~= "Vector3" then return false end
         local x, y, z = v.X, v.Y, v.Z
         if x ~= x or y ~= y or z ~= z then return false end
-        return x < math.huge and x > -math.huge and y < math.huge and y > -math.huge and z < math.huge and z > -math.huge
+        return x < math.huge and x > -math.huge
+                and y < math.huge and y > -math.huge
+                and z < math.huge and z > -math.huge
 end
 
 local function safeUnit(v3)
@@ -155,13 +295,21 @@ local function safeUnit(v3)
         return isFiniteVec3(unit) and unit or nil
 end
 
-local WeaponService, ESPService, clearESPVisuals, setStickyStatus, TPService
+local WeaponService
+local ESPService
+local clearESPVisuals
+local setStickyStatus
+local TPService
+
 local setStatusFn = nil
 local function setGlxStatus(msg)
-        print("[GLX] " + tostring(msg))
-        if setStatusFn then pcall(setStatusFn, tostring(msg)) end
+        print("[GLX] " .. tostring(msg))
+        if setStatusFn then
+                pcall(setStatusFn, tostring(msg))
+        end
 end
 
+print(("[GLX v3.11] tick=%.3f step2: building UI"):format(os.clock()))
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "Glx_UI"
 ScreenGui.ResetOnSpawn = false
@@ -175,7 +323,8 @@ do
         pcall(function() table.insert(parents, game:GetService("CoreGui")) end)
         if LocalPlayer then
                 pcall(function()
-                        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+                        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+                                or LocalPlayer:WaitForChild("PlayerGui", 5)
                         if pg then table.insert(parents, pg) end
                 end)
         end
@@ -183,6 +332,9 @@ do
                 local okP = pcall(function() ScreenGui.Parent = par end)
                 if okP and ScreenGui.Parent ~= nil then break end
         end
+end
+if not ScreenGui.Parent then
+        warn("[GLX v3.10] ใส่ UI ลงเกมไม่ได้ (CoreGui/PlayerGui ถูกปิด) — UI จะไม่แสดง")
 end
 CleanupManager:AddInstance("MainUI", ScreenGui)
 
@@ -227,24 +379,30 @@ local function enableDrag(handle, target)
         local dragging = false
         local dragStart, startPos
         local wasDragged = false
+
         dragConnIndex += 1
         CleanupManager:AddConn("DragBegan" .. dragConnIndex, handle.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                        or input.UserInputType == Enum.UserInputType.Touch then
                         dragging = true
                         wasDragged = false
                         dragStart = input.Position
                         startPos = target.Position
                 end
         end))
+
         dragConnIndex += 1
         CleanupManager:AddConn("DragEnded" .. dragConnIndex, handle.InputEnded:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                        or input.UserInputType == Enum.UserInputType.Touch then
                         dragging = false
                 end
         end))
+
         dragConnIndex += 1
         CleanupManager:AddConn("DragMoved" .. dragConnIndex, UserInputService.InputChanged:Connect(function(input)
-                if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+                        or input.UserInputType == Enum.UserInputType.Touch) then
                         local delta = input.Position - dragStart
                         if delta.Magnitude >= 6 then wasDragged = true end
                         target.Position = UDim2.new(
@@ -253,6 +411,7 @@ local function enableDrag(handle, target)
                         )
                 end
         end))
+
         return function() return wasDragged end
 end
 
@@ -289,7 +448,9 @@ local function applyStatusText(text)
         statusDirty = true
         StatusLabel.Text = lastStatusText
 end
-setStatusFn = function(msg) applyStatusText(msg) end
+setStatusFn = function(msg)
+        applyStatusText(msg)
+end
 
 local toggleBtnWasDragged = nil
 ToggleBtn.MouseButton1Click:Connect(function()
@@ -470,10 +631,14 @@ local function createSlider(text, min, max, default, step, callback)
 
         local dragging = false
         sliderBar.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                        or input.UserInputType == Enum.UserInputType.Touch then
                         dragging = true
+
                         local function update(inp)
-                                local ratio = math.clamp((inp.Position.X - sliderBar.AbsolutePosition.X) / math.max(sliderBar.AbsoluteSize.X, 1), 0, 1)
+                                local ratio = math.clamp(
+                                        (inp.Position.X - sliderBar.AbsolutePosition.X)
+                                        / math.max(sliderBar.AbsoluteSize.X, 1), 0, 1)
                                 local n = math.floor((min + ratio * (max - min)) / step + 0.5)
                                 local stepped = math.floor(n * step * 1e6 + 0.5) / 1e6
                                 stepped = math.clamp(stepped, min, max)
@@ -481,18 +646,21 @@ local function createSlider(text, min, max, default, step, callback)
                                 valLabel.Text = (step >= 1) and tostring(math.floor(stepped + 0.5)) or tostring(stepped)
                                 callback(stepped)
                         end
+
                         update(input)
                         local moveConn, relConn
                         sliderDragIndex += 1
                         local gestureId = "SliderDrag" .. sliderDragIndex
                         moveConn = UserInputService.InputChanged:Connect(function(moveInp)
-                                if dragging and (moveInp.UserInputType == Enum.UserInputType.MouseMovement or moveInp.UserInputType == Enum.UserInputType.Touch) then
+                                if dragging and (moveInp.UserInputType == Enum.UserInputType.MouseMovement
+                                        or moveInp.UserInputType == Enum.UserInputType.Touch) then
                                         update(moveInp)
                                 end
                         end)
                         CleanupManager:AddConn(gestureId .. "Move", moveConn)
                         relConn = UserInputService.InputEnded:Connect(function(relInp)
-                                if relInp.UserInputType == Enum.UserInputType.MouseButton1 or relInp.UserInputType == Enum.UserInputType.Touch then
+                                if relInp.UserInputType == Enum.UserInputType.MouseButton1
+                                        or relInp.UserInputType == Enum.UserInputType.Touch then
                                         dragging = false
                                         CleanupManager:RemoveConn(gestureId .. "Move")
                                         CleanupManager:RemoveConn(gestureId .. "End")
@@ -508,8 +676,10 @@ createModeSelector("Target Part", { "Head", "Torso", "Random" }, 1, function(v) 
 createToggle("Show FOV Circle", State.ShowFOV, function(v) State.ShowFOV = v end)
 createToggle("Team Check", State.TeamCheck, function(v) State.TeamCheck = v end)
 createToggle("Wall Check", State.WallCheck, function(v) State.WallCheck = v end)
+
 createToggle("Prediction Engine", State.Prediction, function(v) State.Prediction = v end)
 createToggle("Ping Compensation", State.PingCompensation, function(v) State.PingCompensation = v end)
+
 createToggle("Drop Value Mode: Multiplier", State.DropIsMultiplier, function(v)
         State.DropIsMultiplier = v
         if WeaponService then
@@ -517,10 +687,12 @@ createToggle("Drop Value Mode: Multiplier", State.DropIsMultiplier, function(v)
                 WeaponService:UpdateAuto()
         end
 end)
+
 createToggle("Auto Weapon Speed", State.AutoBulletSpeed, function(v)
         State.AutoBulletSpeed = v
         if WeaponService then WeaponService:UpdateAuto() end
 end)
+
 createToggle("ESP Wallhack", State.ESP, function(v)
         State.ESP = v
         if ESPService and clearESPVisuals and not v then clearESPVisuals(true, false) end
@@ -529,6 +701,7 @@ createToggle("ESP Username", State.ESPName, function(v)
         State.ESPName = v
         if ESPService and clearESPVisuals and not v then clearESPVisuals(false, true) end
 end)
+
 createSlider("Manual Bullet Speed", 500, 10000, State.BulletSpeed, 100, function(v)
         State.BulletSpeed = v
         if WeaponService then WeaponService:UpdateManual() end
@@ -539,15 +712,31 @@ createSlider("Manual Gravity", 0, 500, State.BulletGravity, 10, function(v)
 end)
 createSlider("Aim Speed", 0.05, 1, State.Smoothness, 0.05, function(v) State.Smoothness = v end)
 createSlider("Aimbot FOV Range", 50, 500, State.FOV, 10, function(v) State.FOV = v end)
-createSlider("Pred Reactivity", 0.2, 3, State.PredReactivity, 0.05, function(v) State.PredReactivity = v end)
-createSlider("Pred Max Slew (s/s)", 0.5, 10, State.PredMaxSlew, 0.5, function(v) State.PredMaxSlew = v end)
+
+createSlider("Pred Reactivity", 0.2, 3, State.PredReactivity, 0.05, function(v)
+        State.PredReactivity = v
+end)
+createSlider("Pred Max Slew (s/s)", 0.5, 10, State.PredMaxSlew, 0.5, function(v)
+        State.PredMaxSlew = v
+end)
+
 createToggle("Lag Comp", State.LagComp, function(v) State.LagComp = v end)
-createSlider("Catch-Up Boost", 0, 3, State.TrackBoost, 0.05, function(v) State.TrackBoost = v end)
+createSlider("Catch-Up Boost", 0, 3, State.TrackBoost, 0.05, function(v)
+        State.TrackBoost = v
+end)
+
 createToggle("Drag To Switch", State.DragSwitch, function(v) State.DragSwitch = v end)
+
 createToggle("Free Steer", State.FreeSteer, function(v) State.FreeSteer = v end)
 createToggle("Switch Assist", State.SwitchAssist, function(v) State.SwitchAssist = v end)
-createSlider("Flick Speed (°/s)", 60, 300, State.FlickSpeed, 5, function(v) State.FlickSpeed = v end)
-createToggle("Weapon Check", State.WeaponCheck, function(v) State.WeaponCheck = v end)
+createSlider("Flick Speed (°/s)", 60, 300, State.FlickSpeed, 5, function(v)
+        State.FlickSpeed = v
+end)
+
+createToggle("Weapon Check", State.WeaponCheck, function(v)
+        State.WeaponCheck = v
+end)
+
 createToggle("Teleport System", State.Teleport, function(v)
         State.Teleport = v
         if TPService and TPService.setEnabled then TPService.setEnabled(v) end
@@ -556,10 +745,13 @@ end)
 if TPService and TPService.setEnabled then TPService.setEnabled(State.Teleport) end
 
 setGlxStatus(M3)
-
+-- ==========================================
+-- 3.9 TELEPORT SYSTEM — BehindTP (merged from tp.txt, v3.12)
+-- ==========================================
 do
         local DIST = 10
         local TAP_SLOP = 8
+
         local tpGui = Instance.new("ScreenGui")
         tpGui.Name = "Glx_BehindTP"
         tpGui.ResetOnSpawn = false
@@ -601,12 +793,14 @@ do
         local function pickTarget()
                 local cam = Workspace.CurrentCamera
                 if not cam then return nil end
+
                 local rayParams = RaycastParams.new()
                 rayParams.FilterType = Enum.RaycastFilterType.Exclude
                 local myChar = LocalPlayer.Character
                 rayParams.FilterDescendantsInstances = myChar and { myChar } or {}
                 local hit = Workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * 1000, rayParams)
                 local model = hit and hit.Instance:FindFirstAncestorOfClass("Model")
+
                 if not (model and model:FindFirstChildOfClass("Humanoid")) then
                         local vp = cam.ViewportSize / 2
                         local best, bestDist
@@ -619,13 +813,16 @@ do
                                                 local sp, on = cam:WorldToViewportPoint(root.Position)
                                                 if on then
                                                         local d = (Vector2.new(sp.X, sp.Y) - vp).Magnitude
-                                                        if not bestDist or d < bestDist then best, bestDist = root, d end
+                                                        if not bestDist or d < bestDist then
+                                                                best, bestDist = root, d
+                                                        end
                                                 end
                                         end
                                 end
                         end
                         return best
                 end
+
                 local plr = Players:GetPlayerFromCharacter(model)
                 if plr and plr ~= LocalPlayer and not (LocalPlayer.Team ~= nil and plr.Team == LocalPlayer.Team) then
                         local hum = model:FindFirstChildOfClass("Humanoid")
@@ -639,7 +836,10 @@ do
                 local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 if not myRoot then return end
                 local target = pickTarget()
-                if not target then setGlxStatus(M9); return end
+                if not target then
+                        setGlxStatus(M9)
+                        return
+                end
                 local spot = target.CFrame * CFrame.new(0, 0, DIST)
                 local lv = target.CFrame.LookVector
                 local face = Vector3.new(lv.X, 0, lv.Z)
@@ -650,12 +850,16 @@ do
 
         local locked = false
         local dragInput, dragStart, startPos
+
         local function isPress(io)
-                return io.UserInputType == Enum.UserInputType.Touch or io.UserInputType == Enum.UserInputType.MouseButton1
+                return io.UserInputType == Enum.UserInputType.Touch
+                        or io.UserInputType == Enum.UserInputType.MouseButton1
         end
 
         tpBtn.InputBegan:Connect(function(io)
-                if isPress(io) then dragInput, dragStart, startPos = io, io.Position, box.Position end
+                if isPress(io) then
+                        dragInput, dragStart, startPos = io, io.Position, box.Position
+                end
         end)
 
         CleanupManager:AddConn("TPDragMoved", UserInputService.InputChanged:Connect(function(io)
@@ -667,7 +871,9 @@ do
         CleanupManager:AddConn("TPDragEnded", UserInputService.InputEnded:Connect(function(io)
                 if io ~= dragInput then return end
                 dragInput = nil
-                if (io.Position - dragStart).Magnitude <= TAP_SLOP then teleport() end
+                if (io.Position - dragStart).Magnitude <= TAP_SLOP then
+                        teleport()
+                end
         end))
 
         lockBadge.Activated:Connect(function()
@@ -676,10 +882,15 @@ do
         end)
 
         TPService = {
-                setEnabled = function(on) tpGui.Enabled = on and true or false end
+                setEnabled = function(on)
+                        tpGui.Enabled = on and true or false
+                end
         }
 end
 
+-- ==========================================
+-- 4. WEAPON SERVICE (Cached Weapon Stats)
+-- ==========================================
 WeaponService = {
         Speed = FALLBACK_SPEED,
         Gravity = workspace.Gravity
@@ -700,32 +911,46 @@ end
 
 function WeaponService:UpdateAuto()
         if not State.AutoBulletSpeed then return self:UpdateManual() end
+
         local char = LocalPlayer and LocalPlayer.Character
         local tool = char and char:FindFirstChildOfClass("Tool")
+
         if not tool then
                 self.Speed = FALLBACK_SPEED
                 self.Gravity = workspace.Gravity
                 return
         end
+
         local cached = WeaponCache[tool]
         if cached then
                 self.Speed = cached.Speed
                 self.Gravity = cached.Gravity
                 return
         end
+
         local toolName = tool.Name:lower()
-        local isLauncher = toolName:find("rpg") or toolName:find("rocket") or toolName:find("launcher") or toolName:find("grenade")
-        local acsSettings = tool:FindFirstChild("ACS_Settings") or tool:FindFirstChild("Settings") or tool:FindFirstChild("Config")
+        local isLauncher = toolName:find("rpg") or toolName:find("rocket")
+                or toolName:find("launcher") or toolName:find("grenade")
+        local acsSettings = tool:FindFirstChild("ACS_Settings")
+                or tool:FindFirstChild("Settings") or tool:FindFirstChild("Config")
+
         local speed, gravity = FALLBACK_SPEED, workspace.Gravity
+
         if acsSettings and acsSettings:IsA("ModuleScript") then
                 local success, config = pcall(require, acsSettings)
                 if success and type(config) == "table" then
                         local s = config.Velo or config.MuzzleVelocity or config.BulletSpeed or config.Velocity
                         speed = (type(s) == "number" and s > 0) and s or speed
-                        local halfG = workspace.Gravity * 0.5
-                        gravity = (isLauncher and not toolName:find("grenade")) and 0 or halfG
+
+                        local drop = config.Drop or config.BulletDrop or config.Gravity
+                        if type(drop) == "number" then
+                                gravity = State.DropIsMultiplier and (workspace.Gravity * drop) or drop
+                        else
+                                gravity = (isLauncher and not toolName:find("grenade")) and 0 or workspace.Gravity
+                        end
                 end
         end
+
         WeaponCache[tool] = { Speed = speed, Gravity = gravity }
         self.Speed = speed
         self.Gravity = gravity
@@ -775,7 +1000,11 @@ if LocalPlayer then
         CleanupManager:AddConn("CharAdded", LocalPlayer.CharacterAdded:Connect(setupCharacterWeaponListener))
 end
 
+-- ==========================================
+-- 5. VISIBILITY SERVICE (Reuse RaycastParams)
+-- ==========================================
 local VisibilityService = {}
+
 local RayParams = RaycastParams.new()
 RayParams.FilterType = Enum.RaycastFilterType.Exclude
 RayParams.IgnoreWater = true
@@ -786,24 +1015,32 @@ local lastFilterCount, lastFilterFirst = -1, nil
 function VisibilityService:CheckVisibility(targetCharacter, pierceCount, specificPart)
         local camera = getCamera()
         if not (camera and targetCharacter) then return false end
+
         local targetPart = specificPart
         if not (targetPart and targetPart.Parent) then
-                targetPart = targetCharacter:FindFirstChild("Head") or targetCharacter:FindFirstChild("HumanoidRootPart")
+                targetPart = targetCharacter:FindFirstChild("Head")
+                        or targetCharacter:FindFirstChild("HumanoidRootPart")
         end
         if not targetPart then return false end
+
         local origin = camera.CFrame.Position
         local targetPos = targetPart.Position
         local direction = targetPos - origin
+
         local distToTarget = direction.Magnitude
         if distToTarget < 0.05 then return true end
 
         local maxPierces = pierceCount or 1
         local currentOrigin = origin
         local currentDirection = direction
+
         table.clear(ScratchFilter)
         local n = 0
         local myChar = LocalPlayer and LocalPlayer.Character
-        if myChar then n += 1; ScratchFilter[n] = myChar end
+        if myChar then
+                n += 1
+                ScratchFilter[n] = myChar
+        end
 
         local filterDirty = (n ~= lastFilterCount) or (ScratchFilter[1] ~= lastFilterFirst)
 
@@ -814,6 +1051,7 @@ function VisibilityService:CheckVisibility(targetCharacter, pierceCount, specifi
                         filterDirty = false
                 end
                 local okRay, result = pcall(Workspace.Raycast, Workspace, currentOrigin, currentDirection, RayParams)
+
                 if not okRay or not result then return true end
 
                 local hitDist = result.Distance
@@ -838,6 +1076,9 @@ function VisibilityService:CheckVisibility(targetCharacter, pierceCount, specifi
         return false
 end
 
+-- ==========================================
+-- 5.1 ENEMY VALIDITY (Component Cache)
+-- ==========================================
 local PlayerCache = setmetatable({}, { __mode = "k" })
 
 local function getComponents(player)
@@ -846,6 +1087,7 @@ local function getComponents(player)
                 PlayerCache[player] = nil
                 return nil
         end
+
         local entry = PlayerCache[player]
         if not entry or entry.Character ~= char then
                 entry = {
@@ -855,10 +1097,19 @@ local function getComponents(player)
                 }
                 PlayerCache[player] = entry
         end
-        if entry.Humanoid and entry.Humanoid.Parent ~= char then entry.Humanoid = nil end
-        if not entry.Humanoid then entry.Humanoid = char:FindFirstChildOfClass("Humanoid") end
-        if entry.Root and entry.Root.Parent ~= char then entry.Root = nil end
-        if not entry.Root then entry.Root = char:FindFirstChild("HumanoidRootPart") end
+
+        if entry.Humanoid and entry.Humanoid.Parent ~= char then
+                entry.Humanoid = nil
+        end
+        if not entry.Humanoid then
+                entry.Humanoid = char:FindFirstChildOfClass("Humanoid")
+        end
+        if entry.Root and entry.Root.Parent ~= char then
+                entry.Root = nil
+        end
+        if not entry.Root then
+                entry.Root = char:FindFirstChild("HumanoidRootPart")
+        end
         return entry
 end
 
@@ -866,6 +1117,7 @@ local function isValidEnemy(player)
         if not player or player == LocalPlayer then return false end
         local entry = getComponents(player)
         if not entry then return false end
+
         local humanoid, root = entry.Humanoid, entry.Root
         if not humanoid or humanoid.Health <= 0 then return false end
         if not root or root.Parent ~= entry.Character then return false end
@@ -875,7 +1127,8 @@ local function isValidEnemy(player)
                 entry.FFCheckUntil = nowFF + 0.25
         end
         if entry.HasForceField then return false end
-        if State.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then
+        if State.TeamCheck and player.Team and LocalPlayer.Team
+                and player.Team == LocalPlayer.Team then
                 return false
         end
         return true
@@ -885,13 +1138,13 @@ print(("[GLX v3.11] tick=%.3f step3: services defined OK"):format(os.clock()))
 CleanupManager:AddConn("PlayerRemovingCaches", Players.PlayerRemoving:Connect(function(player)
         PlayerCache[player] = nil
 end))
-
 local TARGET_GRACE = 0.25
 local KEEP_HYSTERESIS = 1.35
 local ZOOM_TAU = 0.08
 local targetGraceUntil = 0
 local zoomSmoothed = nil
 local keepWallCheckUntil, keepWallVisible = 0, true
+
 local SWITCH_COOLDOWN = 0.30
 local switchAwayKey = nil
 local switchCooldownUntil = 0
@@ -901,6 +1154,9 @@ local lastSwitchCheck = 0
 local ACQUIRE_INTERVAL = 1 / 30
 local lastAcquireAt = 0
 
+-- ==========================================
+-- 6. TARGET SERVICE (State Machine)
+-- ==========================================
 local TargetService = {
         CurrentTarget = nil,
         TargetPart = nil,
@@ -943,10 +1199,12 @@ end
 function TargetService:KeepTarget(camera, screenX, screenY, scaledFOV)
         local target = self.CurrentTarget
         if not isValidEnemy(target) then return false, false end
+
         local part = self.TargetPart
         if not (part and part.Parent and part:IsDescendantOf(target.Character)) then
                 return false, false
         end
+
         if State.WallCheck then
                 local nowWC = os.clock()
                 if nowWC >= (keepWallCheckUntil or 0) then
@@ -955,8 +1213,10 @@ function TargetService:KeepTarget(camera, screenX, screenY, scaledFOV)
                 end
                 if not keepWallVisible then return false, false end
         end
+
         local screenPoint, onScreen = camera:WorldToViewportPoint(part.Position)
         if not onScreen or screenPoint.Z <= 0 then return false, true end
+
         local dx = screenPoint.X - screenX
         local dy = screenPoint.Y - screenY
         local keepRadius = scaledFOV * KEEP_HYSTERESIS
@@ -969,6 +1229,7 @@ function TargetService:AcquireTarget(camera, screenX, screenY, scaledFOV)
         local closestPlayer, bestPart = nil, nil
         local now = os.clock()
         local cooldownActive = switchCooldownUntil > now and switchAwayKey ~= nil
+
         local players = Players:GetPlayers()
         for i = 1, #players do
                 local player = players[i]
@@ -982,7 +1243,8 @@ function TargetService:AcquireTarget(camera, screenX, screenY, scaledFOV)
                                         local distSq = dx*dx + dy*dy
                                         local banned = cooldownActive and player == switchAwayKey
                                         if distSq < closestDistSq and (not banned or distSq <= banRadiusSq) then
-                                                if not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1, part) then
+                                                if not State.WallCheck
+                                                        or VisibilityService:CheckVisibility(player.Character, 1, part) then
                                                         closestDistSq = distSq
                                                         closestPlayer = player
                                                         bestPart = part
@@ -992,6 +1254,7 @@ function TargetService:AcquireTarget(camera, screenX, screenY, scaledFOV)
                         end
                 end
         end
+
         if closestPlayer then
                 if closestPlayer ~= self.CurrentTarget then
                         self.LockedPartName = nil
@@ -1005,19 +1268,24 @@ function TargetService:CheckSwitch(camera, screenX, screenY, scaledFOV)
         local now = os.clock()
         if now - lastSwitchCheck < SWITCH_CHECK_INTERVAL then return end
         lastSwitchCheck = now
+
         local target = self.CurrentTarget
         local part = self.TargetPart
         if not (target and part and part.Parent) then return end
+
         local myPoint, myOn = camera:WorldToViewportPoint(part.Position)
         if not (myOn and myPoint.Z > 0) then return end
         local myDx, myDy = myPoint.X - screenX, myPoint.Y - screenY
         local myDistSq = myDx*myDx + myDy*myDy
+
         local limitSq = math.min(myDistSq * (SWITCH_RATIO * SWITCH_RATIO), scaledFOV * scaledFOV)
         if limitSq <= 0 then return end
+
         local cooldownActive = switchCooldownUntil > now and switchAwayKey ~= nil
         local banRadiusSq = (scaledFOV * 0.12) * (scaledFOV * 0.12)
         local bestDistSq = limitSq
         local bestPlayer, bestPart = nil, nil
+
         local players = Players:GetPlayers()
         for i = 1, #players do
                 local player = players[i]
@@ -1039,7 +1307,9 @@ function TargetService:CheckSwitch(camera, screenX, screenY, scaledFOV)
                         end
                 end
         end
-        if bestPlayer and (not State.WallCheck or VisibilityService:CheckVisibility(bestPlayer.Character, 1, bestPart)) then
+
+        if bestPlayer and (not State.WallCheck
+                or VisibilityService:CheckVisibility(bestPlayer.Character, 1, bestPart)) then
                 switchAwayKey = target
                 switchCooldownUntil = now + SWITCH_COOLDOWN
                 self.CurrentTarget = bestPlayer
@@ -1051,9 +1321,13 @@ function TargetService:CheckSwitch(camera, screenX, screenY, scaledFOV)
         end
 end
 
+-- ==========================================
+-- 7. ADVANCED PREDICTION ENGINE
+-- ==========================================
 local TargetStates = setmetatable({}, { __mode = "k" })
 local MAX_SAMPLE_DT = 0.1
 local MAX_PREDICTION_TIME = 5.0
+
 local MAX_DV_PER_SAMPLE = 35
 local SPIKE_COOLDOWN = 0.15
 local MAX_ACCEL = 200
@@ -1090,6 +1364,7 @@ end
 
 local function getTargetAcceleration(kinPart, targetVel, currentTime)
         local state = TargetStates[kinPart]
+
         local velSane = isFiniteVec3(targetVel) and targetVel.Magnitude <= VELOCITY_SANITY
         if not velSane then
                 if state then
@@ -1154,6 +1429,7 @@ local function getTargetAcceleration(kinPart, targetVel, currentTime)
         end
 
         local dv = targetVel - previousVelocity
+
         if dv.Magnitude > MAX_DV_PER_SAMPLE then
                 state.spikeUntil = currentTime + SPIKE_COOLDOWN
                 state.smoothedAcceleration = Vector3.zero
@@ -1162,7 +1438,9 @@ local function getTargetAcceleration(kinPart, targetVel, currentTime)
         end
 
         local rawAcceleration = dv / dt
+
         state.smoothedVelocity = state.smoothedVelocity:Lerp(targetVel, velAlpha)
+
         local tau = ACCEL_TAU_BASE / math.clamp(State.PredReactivity or 1.0, 0.2, 3)
         local alpha = 1 - math.exp(-dt / tau)
         state.smoothedAcceleration = state.smoothedAcceleration:Lerp(rawAcceleration, alpha)
@@ -1183,9 +1461,11 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
         local dt = deltaTime or (1 / 60)
         local currentTime = os.clock()
         local targetPos = targetPart.Position
+
         local kinPart = getKinematicPart(targetPart)
         local targetAcc, targetVel = getTargetAcceleration(kinPart, kinPart.AssemblyLinearVelocity, currentTime)
         local pingOffset = (State.PingCompensation and (getPing() * 0.5) or 0) + (leadTime or 0)
+
         local accelLeadCap = MAX_ACCEL_LEAD / (zoomScale or getZoomScale(getCamera()))
 
         local function f(t)
@@ -1226,7 +1506,8 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
                 local prevPredictionTime = state.lastPredictionTime
                 if prevPredictionTime then
                         local maxDelta = (State.PredMaxSlew or 3.0) * dt
-                        t_intercept = prevPredictionTime + math.clamp(t_intercept - prevPredictionTime, -maxDelta, maxDelta)
+                        t_intercept = prevPredictionTime
+                                + math.clamp(t_intercept - prevPredictionTime, -maxDelta, maxDelta)
                 end
                 state.lastPredictionTime = t_intercept
         end
@@ -1269,9 +1550,12 @@ local function getPredictedPosition(targetPart, shooterPos, deltaTime, leadTime,
         local bulletSpeed = math.max(WeaponService.Speed, 1)
         local aimDirection = solveInterceptVector(shooterPos, targetPart, bulletSpeed, lastGravVec, deltaTime, leadTime, zoomScale)
         if aimDirection then return shooterPos + (aimDirection * 10000) end
+
         return targetPos
 end
-
+-- ==========================================
+-- 8. ESP SERVICE (Throttle 30Hz, Ref-Cached)
+-- ==========================================
 ESPService = {
         Cache = {},
         COLOR_VISIBLE = Color3.fromRGB(0, 255, 128),
@@ -1364,6 +1648,7 @@ function ESPService:ProcessESP()
                 local player = players[i]
                 if player ~= LocalPlayer then
                         local char = player.Character
+
                         if not char then
                                 destroyEntryVisuals(self.Cache[player])
                                 self.Cache[player] = nil
@@ -1383,6 +1668,7 @@ function ESPService:ProcessESP()
                                 end
 
                                 local isEnemy = isValidEnemy(player)
+
                                 if not isEnemy or (not State.ESP and not State.ESPName) then
                                         if entry.Highlight then entry.Highlight:Destroy(); entry.Highlight = nil end
                                         if entry.NameTag then entry.NameTag:Destroy(); entry.NameTag = nil end
@@ -1462,7 +1748,8 @@ local ESP_INTERVAL = 1 / 30
 local lastEspTick = os.clock()
 local espErrStreak = 0
 local espProcessFn = function() ESPService:ProcessESP() end
-local traceFn = (type(debug) == "table" and type(debug.traceback) == "function") and debug.traceback or function(e) return tostring(e) end
+local traceFn = (type(debug) == "table" and type(debug.traceback) == "function")
+        and debug.traceback or function(e) return tostring(e) end
 
 local function connectESP()
         CleanupManager:AddConn("ESP_Heartbeat", RunService.Heartbeat:Connect(function(dt)
@@ -1509,7 +1796,8 @@ task.spawn(function()
                         local char = player.Character
                         if char then
                                 for _, child in ipairs(char:GetChildren()) do
-                                        if (child.Name == "ESP_Highlight" or child.Name == "ESP_NameTag") and not (owned and owned[child]) then
+                                        if (child.Name == "ESP_Highlight" or child.Name == "ESP_NameTag")
+                                                and not (owned and owned[child]) then
                                                 pcall(child.Destroy, child)
                                         end
                                 end
@@ -1517,7 +1805,9 @@ task.spawn(function()
                 end
         end
 end)
-
+-- ==========================================
+-- 9. MAIN CAMERA ENGINE
+-- ==========================================
 local FOVCircle
 do
         local okDraw, drawObj = pcall(function() return Drawing.new("Circle") end)
@@ -1567,7 +1857,6 @@ local prevErrDeg = nil
 
 local lastRenderTick = os.clock()
 local renderErrStreak = 0
-
 local function renderTick(deltaTime)
         local camera = getCamera()
         if not camera then return end
@@ -1585,30 +1874,30 @@ local function renderTick(deltaTime)
         end
 
         if aiming then
-                local userLook = camera.CFrame.LookVector
-                local dtSafe = math.max(deltaTime, 1e-4)
-                userDps = math.huge
+        local userLook = camera.CFrame.LookVector
+        local dtSafe = math.max(deltaTime, 1e-4)
+        userDps = math.huge
+        if prevReadLook then
+                local uDot = math.clamp(userLook:Dot(prevReadLook), -1, 1)
+                local uDeg = math.deg(math.acos(uDot))
+                if uDeg > 0.05 then userDps = uDeg / dtSafe end
+        end
+        if lastWriteLook then
+                local wDot = math.clamp(userLook:Dot(lastWriteLook), -1, 1)
+                local wDeg = math.deg(math.acos(wDot))
+                local againstPull = false
                 if prevReadLook then
-                        local uDot = math.clamp(userLook:Dot(prevReadLook), -1, 1)
-                        local uDeg = math.deg(math.acos(uDot))
-                        if uDeg > 0.05 then userDps = uDeg / dtSafe end
+                        local pullAxis = prevReadLook:Cross(lastWriteLook)
+                        local handAxis = lastWriteLook:Cross(userLook)
+                        againstPull = pullAxis:Dot(handAxis) < 0
                 end
-                if lastWriteLook then
-                        local wDot = math.clamp(userLook:Dot(lastWriteLook), -1, 1)
-                        local wDeg = math.deg(math.acos(wDot))
-                        local againstPull = false
-                        if prevReadLook then
-                                local pullAxis = prevReadLook:Cross(lastWriteLook)
-                                local handAxis = lastWriteLook:Cross(userLook)
-                                againstPull = pullAxis:Dot(handAxis) < 0
-                        end
-                        if againstPull or wDeg / dtSafe < userDps then
-                                userDps = wDeg / dtSafe
-                        end
+                if againstPull or wDeg / dtSafe < userDps then
+                        userDps = wDeg / dtSafe
                 end
-                if userDps == math.huge then userDps = 0 end
-                prevReadLook = userLook
-                lastWriteLook = nil
+        end
+        if userDps == math.huge then userDps = 0 end
+        prevReadLook = userLook
+        lastWriteLook = nil
         end
         local nowClock = os.clock()
 
@@ -1715,7 +2004,8 @@ local function renderTick(deltaTime)
                         local maxStepDps = (120 + State.Smoothness * 240) * zoomScale
                         alpha = math.min(alpha, (maxStepDps * sdt) / math.max(errDeg, 0.05))
 
-                        local steering = State.FreeSteer and userDps > STEER_DPS and prevErrDeg ~= nil and errDeg > prevErrDeg + 0.05
+                        local steering = State.FreeSteer and userDps > STEER_DPS
+                                and prevErrDeg ~= nil and errDeg > prevErrDeg + 0.05
                         if steering then
                                 if not steerHoldStart then steerHoldStart = nowClock end
                                 if State.DragSwitch and nowClock - steerHoldStart >= STEER_HOLD then
@@ -1765,6 +2055,9 @@ local function connectRenderLoop()
 end
 connectRenderLoop()
 
+-- ==========================================
+-- 11. LOAD REPORT & WATCHDOG
+-- ==========================================
 setGlxStatus(M5)
 
 local stickyMsg, stickyUntil = nil, 0
