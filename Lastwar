@@ -100,7 +100,8 @@ local State = {
         WeaponCheck = false, TargetPartMode = "Head", PingCompensation = true,
         DropIsMultiplier = true, AutoBulletSpeed = true, BulletSpeed = 5000,
         BulletGravity = workspace.Gravity, Smoothness = 0.8, FOV = 100,
-        ShowFOV = false, ESP = true, ESPName = true, Teleport = false
+        ShowFOV = false, ESP = true, ESPName = true, Teleport = false,
+        NoSpreadRecoil = true
 }
 
 local function getCamera() return Workspace.CurrentCamera end
@@ -318,7 +319,7 @@ local function createSlider(text, min, max, default, step, callback)
         sliderBar.InputBegan:Connect(function(input)
                 if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                         dragging = true
-                        local function update(inp)
+                      local function update(inp)
                                 local ratio = math.clamp((inp.Position.X - sliderBar.AbsolutePosition.X) / math.max(sliderBar.AbsoluteSize.X, 1), 0, 1)
                                 local n = math.floor((min + ratio * (max - min)) / step + 0.5)
                                 local stepped = math.floor(n * step * 1e6 + 0.5) / 1e6
@@ -375,6 +376,12 @@ createToggle("Free Steer", State.FreeSteer, function(v) State.FreeSteer = v end)
 createToggle("Switch Assist", State.SwitchAssist, function(v) State.SwitchAssist = v end)
 createSlider("Flick Speed (°/s)", 60, 300, State.FlickSpeed, 5, function(v) State.FlickSpeed = v end)
 createToggle("Weapon Check", State.WeaponCheck, function(v) State.WeaponCheck = v end)
+createToggle("No Spread + No Recoil", State.NoSpreadRecoil, function(v) State.NoSpreadRecoil = v end)
+createToggle("Speed Hack", State.SpeedHack, function(v) onSpeedHackToggle(v) end)
+createSlider("Speed Value", 16, 100, State.SpeedHackValue, 4, function(v)
+        State.SpeedHackValue = v
+        if State.SpeedHack then applySpeedHack() end
+end)
 createToggle("Teleport System", State.Teleport, function(v)
         State.Teleport = v; if TPService and TPService.setEnabled then TPService.setEnabled(v) end
         if not v then setGlxStatus(M11) end
@@ -437,7 +444,10 @@ do
                 if not myRoot then return end
                 local target = pickTarget(); if not target then setGlxStatus(T{216,128,190,219,132,156,222,134,200,161,250,221,164,253,220,215,129,185,218,131,167,221,135,182,160,249,240,163,252,238,166,143,153,217,130,137,220,133,156,223,248,219,162,251,221,165,254,156,216,129,163,219,133,180,222,135,242,161,250,203,164,253,235}); return end
                 local spot = target.CFrame * CFrame.new(0, 0, DIST)
-                local lv = target.CFrame.LookVector; local face = Vector3.new(lv.X, 0, lv.Z)
+                -- face the target (look at target, not look where target looks)
+                -- we are behind the target, so look direction = from us → toward target
+                local face = (target.Position - spot.Position)
+                face = Vector3.new(face.X, 0, face.Z)
                 face = face.Magnitude > 0.05 and face.Unit or Vector3.new(0, 0, -1)
                 myRoot.CFrame = CFrame.lookAt(spot.Position, spot.Position + face)
                 setGlxStatus(T{216,128,186,219,132,170,222,134,192,161,250,230,164,253,216,215,128,148,218,131,159,221,135,179,160,249,215,163,252,239,166,143,139,217,131,187,220,133,157,223,249,198,162,251,204})
@@ -530,10 +540,7 @@ local function setupCharacterWeaponListener(char)
         CleanupManager:AddConn("ToolAdded", char.ChildAdded:Connect(function(child)
                 if child:IsA("Tool") then
                         hookToolConfigWatcher(child)
-                        task.defer(function()
-                                local t = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-                                if t == child then WeaponService:UpdateAuto() end
-                        end)
+                        task.defer(function() WeaponService:UpdateAuto() end)
                 end
         end))
         CleanupManager:AddConn("ToolRemoved", char.ChildRemoved:Connect(function() task.defer(function() WeaponService:UpdateAuto() end) end))
@@ -606,10 +613,103 @@ local function isValidEnemy(player)
                 entry.HasForceField = entry.Character:FindFirstChildOfClass("ForceField") ~= nil; entry.FFCheckUntil = nowFF + 0.25
         end
         if entry.HasForceField then return false end
-        if State.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then return false end
+        if State.TeamCheck then
+                if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then return false end
+                if player.TeamColor and LocalPlayer.TeamColor and player.TeamColor == LocalPlayer.TeamColor then return false end
+        end
         return true
 end
 CleanupManager:AddConn("PlayerRemovingCaches", Players.PlayerRemoving:Connect(function(player) PlayerCache[player] = nil end))
+
+-- ==========================================
+-- 4.5 NO-SPREAD / NO-RECOIL MODULE
+-- ==========================================
+local _origRequire = require
+local _patchedModules = setmetatable({}, { __mode = "k" })
+local RECOIL_KEYS = { "gunRecoilUp", "gunRecoilTilt", "gunRecoilLeft", "gunRecoilRight", "camRecoilUp", "camRecoilTilt", "camRecoilLeft", "camRecoilRight" }
+local function patchACSConfig(config)
+        if type(config) ~= "table" then return end
+        if config.MinSpread ~= nil then config.MinSpread = 0 end
+        if config.MaxSpread ~= nil then config.MaxSpread = 0 end
+        if type(config.gunRecoil) == "table" then
+                for _, key in ipairs(RECOIL_KEYS) do
+                        if key:sub(1,3) == "gun" and config.gunRecoil[key] ~= nil then config.gunRecoil[key] = {0, 0} end
+                end
+        end
+        if type(config.camRecoil) == "table" then
+                for _, key in ipairs(RECOIL_KEYS) do
+                        if key:sub(1,3) == "cam" and config.camRecoil[key] ~= nil then config.camRecoil[key] = {0, 0} end
+                end
+        end
+        if config.AimRecoilReduction ~= nil then config.AimRecoilReduction = 0 end
+        if config.AimSpreadReduction ~= nil then config.AimSpreadReduction = 0 end
+        if config.MinRecoilPower ~= nil then config.MinRecoilPower = 0 end
+        if config.MaxRecoilPower ~= nil then config.MaxRecoilPower = 0 end
+end
+require = function(module)
+        local result = _origRequire(module)
+        if State.NoSpreadRecoil and type(result) == "table" and not _patchedModules[module] then
+                if result.gunRecoil or result.camRecoil or result.MinSpread or result.MaxSpread then
+                        _patchedModules[module] = true
+                        patchACSConfig(result)
+                end
+        end
+        return result
+end
+print("[GLX v3.16] No-Spread/No-Recoil module loaded — hooks require() for ACS_Settings")
+
+-- ==========================================
+-- 4.6 SPEED HACK MODULE
+-- ==========================================
+local SpeedHack = { Enabled = false, Speed = 32 }
+State.SpeedHack = false
+State.SpeedHackValue = 32
+local _speedHackConn = nil
+local _speedHackDefaultWalkSpeed = 16
+local _speedHackDefaultJumpPower = 19.017
+
+local function applySpeedHack()
+        local char = LocalPlayer and LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChild("Humanoid")
+        if not hum then return end
+        if State.SpeedHack then
+                hum.WalkSpeed = State.SpeedHackValue
+                hum.JumpPower = _speedHackDefaultJumpPower * (State.SpeedHackValue / _speedHackDefaultWalkSpeed)
+        else
+                hum.WalkSpeed = _speedHackDefaultWalkSpeed
+                hum.JumpPower = _speedHackDefaultJumpPower
+        end
+end
+
+local function connectSpeedHack()
+        if _speedHackConn then _speedHackConn:Disconnect(); _speedHackConn = nil end
+        if not State.SpeedHack then return end
+        _speedHackConn = RunService.RenderStepped:Connect(function()
+                applySpeedHack()
+        end)
+end
+
+local function onSpeedHackToggle(v)
+        State.SpeedHack = v
+        if v then
+                connectSpeedHack()
+        else
+                if _speedHackConn then _speedHackConn:Disconnect(); _speedHackConn = nil end
+                applySpeedHack() -- restore defaults
+        end
+end
+
+-- Hook character respawn to re-apply speed
+CleanupManager:AddConn("SpeedHackCharAdded", LocalPlayer.CharacterAdded:Connect(function(char)
+        task.wait(0.3)
+        if State.SpeedHack then
+                connectSpeedHack()
+                applySpeedHack()
+        end
+end))
+
+print("[GLX v3.16] Speed Hack module loaded — default WalkSpeed=" .. _speedHackDefaultWalkSpeed)
 
 print("[GLX v3.14-FIX] PART 2/5 loaded — Weapon + Visibility + EnemyValidity ready")
 -- =====================================================================
@@ -824,6 +924,7 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
 end
 
 local lastGravVal, lastGravVec = nil, nil
+local predFallbackStreak = 0
 local function getPredictedPosition(targetPart, shooterPos, deltaTime, leadTime, zoomScale)
         local targetPos = targetPart.Position
         if not State.Prediction then
@@ -840,7 +941,9 @@ local function getPredictedPosition(targetPart, shooterPos, deltaTime, leadTime,
         if lastGravVal ~= WeaponService.Gravity then lastGravVal = WeaponService.Gravity; lastGravVec = Vector3.new(0, -lastGravVal, 0) end
         local bulletSpeed = math.max(WeaponService.Speed, 1)
         local aimDirection = solveInterceptVector(shooterPos, targetPart, bulletSpeed, lastGravVec, deltaTime, leadTime, zoomScale)
-        if aimDirection then return shooterPos + (aimDirection*10000) end
+        if aimDirection then predFallbackStreak = 0; return shooterPos + (aimDirection*10000) end
+        predFallbackStreak += 1
+        if predFallbackStreak % 60 == 1 then setGlxStatus("prediction fallback streak "..predFallbackStreak.." (bullet="..math.floor(bulletSpeed)..")") end
         return targetPos
 end
 
@@ -991,9 +1094,11 @@ task.spawn(function()
                 for _, entry in pairs(ESPService.Cache) do
                         if entry.Highlight or entry.NameTag then owned = owned or {}; if entry.Highlight then owned[entry.Highlight] = true end; if entry.NameTag then owned[entry.NameTag] = true end end
                 end
+                local sweepRemove = {}
                 for inst in pairs(ESPRegistry) do
-                        if inst.Parent and not (owned and owned[inst]) then ESPRegistry[inst] = nil; pcall(inst.Destroy, inst) end
+                        if inst.Parent and not (owned and owned[inst]) then sweepRemove[#sweepRemove+1] = inst end
                 end
+                for _, inst in ipairs(sweepRemove) do ESPRegistry[inst] = nil; pcall(inst.Destroy, inst) end
                 for _, player in ipairs(Players:GetPlayers()) do
                         local char = player.Character
                         if char then
@@ -1121,7 +1226,7 @@ local function renderTick(deltaTime)
                                 if ok and newCFrame then camera.CFrame = newCFrame; lastWriteLook = smoothDirection end
                         end
                         prevErrDeg = errDeg
-                end
+                else prevErrDeg = nil end
         end
 end
 
@@ -1181,5 +1286,3 @@ do
 end
 
 print("[GLX v3.14-FIX] PART 5/5 loaded — ALL SYSTEMS READY ✅")
-
-  
