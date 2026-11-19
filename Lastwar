@@ -436,8 +436,8 @@ do
                 local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 if not myRoot then return end
                 local target = pickTarget(); if not target then setGlxStatus(T{216,128,190,219,132,156,222,134,200,161,250,221,164,253,220,215,129,185,218,131,167,221,135,182,160,249,240,163,252,238,166,143,153,217,130,137,220,133,156,223,248,219,162,251,221,165,254,156,216,129,163,219,133,180,222,135,242,161,250,203,164,253,235}); return end
-                local spot = target.CFrame * CFrame.new(0, 0, -DIST)
-                -- face the SAME direction as the enemy (stand behind, look forward together)
+                local spot = target.CFrame * CFrame.new(0, 0, DIST)
+                -- face the SAME direction as the enemy (stand behind, look at their back)
                 local lv = target.CFrame.LookVector; local face = Vector3.new(lv.X, 0, lv.Z)
                 face = face.Magnitude > 0.05 and face.Unit or Vector3.new(0, 0, -1)
                 myRoot.CFrame = CFrame.lookAt(spot.Position, spot.Position + face)
